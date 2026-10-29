@@ -29,7 +29,5 @@ private class VerifyDateTest {
         System.assertEquals(testDate,resultDate);
     }  
 }
-/*
-Today we are giving GitHub Demo
-// This is old apex test class and not modifeied
-*/ // rich people 
+
+  //Testing GitHub Actions DevOps Pipeline

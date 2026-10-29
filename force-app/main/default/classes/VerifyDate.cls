@@ -28,12 +28,5 @@ public class VerifyDate {
         return lastDay;
     }
  }
- /*
- //Newly Changes updated by me and Naveen
- add Merge comments like
- Apex::[VerifyDateTest]::Apex
- */
-
- //Today we are discussing on salesforce CLI Deployment
-
- //I have added a method succesfully 
+ 
+ //Testing GitHub Actions DevOps Pipeline
