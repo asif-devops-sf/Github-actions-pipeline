@@ -36,6 +36,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       - name: Install Salesforce CLI
         run: |
           npm install @salesforce/cli --global
@@ -52,7 +56,10 @@ jobs:
           sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
           cat package/package.xml
           
-      - run: echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+      - name: Create server key
+        env:
+          SERVER_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
+        run: echo "$SERVER_KEY" > server.key
       - run: sf org login jwt --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58
          --jwt-key-file server.key --username mohammedasif3825.a9fe638d49ad@agentforce.com --instance-url http://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com --alias production
       - name: Deploy Delta components to Salesforce RunSpecifiedTests
