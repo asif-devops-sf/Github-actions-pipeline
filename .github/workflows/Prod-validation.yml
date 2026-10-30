@@ -34,7 +34,10 @@
               pip install --upgrade pip
               pip install xq
               pip install yq
-          - run: echo "${{ secrets.SALESFORCE_JWT_SECRET_KEY }}" > server.key
+          - name: Create server key
+            env:
+                SERVER_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
+            run: echo "$SERVER_KEY" > server.key
           - run: sf org login jwt --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58 --jwt-key-file server.key --username 	mohammedasif3825.a9fe638d49ad@agentforce.com --instance-url http://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com --alias production
           - name: Debug Test Classes File
             run: cat test-classes.txt
