@@ -66,7 +66,7 @@ jobs:
           echo "$FILES"
           ARGS=""
           for f in $FILES; do ARGS="$ARGS --target $f"; done
-          sf code-analyzer run --workspace force-app $ARGS --rule-selector Recommended --severity-threshold 2
+          sf code-analyzer run --workspace force-app $ARGS --rule-selector Recommended --severity-threshold 3
       - name: Install sfdxGit delta
         run: |
           echo y | sf plugins install sfdx-git-delta
