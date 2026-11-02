@@ -46,6 +46,27 @@ jobs:
           sf --help
           pip install xq
           pip install yq
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Code Analyzer quality gate (changed files only)
+        run: |
+          sf plugins install code-analyzer
+          FILES=$(git diff --name-only --diff-filter=ACMR HEAD~1 HEAD -- \
+            force-app/main/default/classes \
+            force-app/main/default/triggers \
+            force-app/main/default/lwc \
+            force-app/main/default/aura | grep -E '\.(cls|trigger|js|html|cmp)$' || true)
+          if [ -z "$FILES" ]; then
+            echo "No Apex/Trigger/LWC/Aura changes to scan"
+            exit 0
+          fi
+          echo "Scanning:"
+          echo "$FILES"
+          ARGS=""
+          for f in $FILES; do ARGS="$ARGS --target $f"; done
+          sf code-analyzer run --workspace force-app $ARGS --rule-selector Recommended --severity-threshold 2
       - name: Install sfdxGit delta
         run: |
           echo y | sf plugins install sfdx-git-delta

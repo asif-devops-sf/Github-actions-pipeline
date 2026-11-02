@@ -29,5 +29,4 @@ public class VerifyDate {
     }
  }
  
-//Testing GitHub Actions DevOps Pipeline - sonar main test
- // QA branch validation test
+//Testing GitHub Actions DevOps Pipeline - code analyzer gate
