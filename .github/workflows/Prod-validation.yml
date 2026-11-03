@@ -15,9 +15,6 @@
           - run: echo "Retrieving main Branch from ${{ github.repository }}."
           - uses: actions/checkout@v4
             with:
-              ref: main
-          - uses: actions/checkout@v4
-            with:
               fetch-depth: 0
           - name: SonarQube Scan
             uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
@@ -26,14 +23,46 @@
           - name: Install Salesforce CLI
             run: |
               npm install -g @salesforce/cli
-              sf --help
-          - name: Setup Python Environment
+          - uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: '17'
+          - name: Code Analyzer quality gate (changed files only)
             run: |
-              python3 -m venv venv
-              . venv/bin/activate
-              pip install --upgrade pip
-              pip install xq
-              pip install yq
+              sf plugins install code-analyzer
+              FILES=$(git diff --name-only --diff-filter=ACMR origin/main...HEAD -- \
+                force-app/main/default/classes \
+                force-app/main/default/triggers \
+                force-app/main/default/lwc \
+                force-app/main/default/aura | grep -E '\.(cls|trigger|js|html|cmp)$' || true)
+              if [ -z "$FILES" ]; then
+                echo "No Apex/Trigger/LWC/Aura changes to scan"
+                echo "## Code Analyzer" >> $GITHUB_STEP_SUMMARY
+                echo "No Apex/Trigger/LWC/Aura changes to scan" >> $GITHUB_STEP_SUMMARY
+                exit 0
+              fi
+              echo "Scanning:"
+              echo "$FILES"
+              ARGS=""
+              for f in $FILES; do ARGS="$ARGS --target $f"; done
+              STATUS=0
+              sf code-analyzer run --workspace force-app $ARGS --rule-selector Recommended --severity-threshold 3 --output-file code-analyzer-report.csv || STATUS=$?
+              echo "## Code Analyzer (changed files only)" >> $GITHUB_STEP_SUMMARY
+              echo "Scanned files:" >> $GITHUB_STEP_SUMMARY
+              echo "$FILES" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+              if [ "$STATUS" -eq 0 ]; then
+                echo "Result: PASSED" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "Result: FAILED (issues at or above the severity threshold). Download the report from Artifacts." >> $GITHUB_STEP_SUMMARY
+              fi
+              exit $STATUS
+          - name: Upload Code Analyzer report
+            if: always()
+            uses: actions/upload-artifact@v4
+            with:
+              name: code-analyzer-report
+              path: code-analyzer-report.csv
+              if-no-files-found: ignore
           - name: Create server key
             env:
                 SERVER_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
