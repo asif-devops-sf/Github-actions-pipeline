@@ -73,6 +73,11 @@ jobs:
             echo "Result: FAILED (issues at or above the severity threshold). Download the report from Artifacts." >> $GITHUB_STEP_SUMMARY
           fi
           exit $STATUS
+      - name: Update API Version in package.xml
+        run: |
+          sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
+          cat package/package.xml    
+          
       - name: Upload Code Analyzer report
         if: always()
         uses: actions/upload-artifact@v4
@@ -84,11 +89,6 @@ jobs:
         run: |
           echo y | sf plugins install sfdx-git-delta
           sf sgd:source:delta --to "HEAD" --from "HEAD~1"  --output "." --ignore .github/workflows/ignore.txt
-
-      - name: Update API Version in package.xml
-        run: |
-          sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
-          cat package/package.xml
           
       - name: Create server key
         env:
