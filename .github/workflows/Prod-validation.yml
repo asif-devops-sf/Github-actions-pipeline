@@ -1,81 +1,250 @@
----
-    name: validate delta changes in Production
-    on:
-      pull_request:
-        branches:
-          - main
-    jobs:
-      SFDX-CLI-Deploy:
-        runs-on: ubuntu-latest
-        steps:
-          - uses: actions/setup-node@v4
-            with:
-              node-version: "22"
-          - run: echo "GitHub Action running on ${{ runner.os }}"
-          - run: echo "Retrieving main Branch from ${{ github.repository }}."
-          - uses: actions/checkout@v4
-            with:
-              ref: main
-          - uses: actions/checkout@v4
-            with:
-              fetch-depth: 0
-          - name: SonarQube Scan
-            uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
-            env:
-              SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          - name: Install Salesforce CLI
-            run: |
-              npm install -g @salesforce/cli
-              sf --help
-          - name: Setup Python Environment
-            run: |
-              python3 -m venv venv
-              . venv/bin/activate
-              pip install --upgrade pip
-              pip install xq
-              pip install yq
-          - name: Create server key
-            env:
-                SERVER_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
-            run: echo "$SERVER_KEY" > server.key
-          - run: sf org login jwt --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58 --jwt-key-file server.key --username 	mohammedasif3825.a9fe638d49ad@agentforce.com --instance-url http://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com --alias production
-          - name: Debug Test Classes File
-            run: cat test-classes.txt
-          - name: Read Test Class Names from File
-            id: read-test-classes
-            run: |
-              TEST_CLASSES=$(cat test-classes.txt | tr '\n' ',' | sed 's/,$//')
-              if [ -z "$TEST_CLASSES" ]; then
-                echo "TEST_CLASSES=" >> $GITHUB_ENV
-                echo "RUN_TESTS=false" >> $GITHUB_ENV
-              else
-                echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
-                echo "RUN_TESTS=true" >> $GITHUB_ENV
-              fi
-          - name: Install sfdxGitDelta
-            run: |
-              echo y | sf plugins install sfdx-git-delta
-          - name: Generate Delta between main and PR Branch
-            run: >
-              # Generate the delta changes between the base branch and the head of the PR
-    
-              sf sgd source delta --to "HEAD" --from "origin/main" --output "." --ignore .github/workflows/ignore.txt    
-          - name: Update API Version in package.xml
-            run: |
-                  sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
-                  cat package/package.xml
-          - name: Debug Environment Variables
-            run: |
-              echo "TEST_CLASSES=${{ env.TEST_CLASSES }}"
-              echo "RUN_TESTS=${{ env.RUN_TESTS }}"
-          - name: Validate Delta Components with Specified Tests
-            if: ${{ env.RUN_TESTS == 'true' }}
-            run: >
-              if [ -z "${{ env.TEST_CLASSES }}" ]; then
-                echo "No test classes specified. Exiting."
-                exit 1
-              fi
-    
-              echo "Running specified tests: ${{ env.TEST_CLASSES }}"
-    
-              sf project deploy validate --manifest package/package.xml --test-level RunSpecifiedTests --tests ${{ env.TEST_CLASSES }} --target-org production --api-version 66.0
+
+name: validate delta changes in Production
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  SFDX-CLI-Deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: echo "GitHub Action running on ${{ runner.os }}"
+
+      - run: echo "Retrieving main Branch from ${{ github.repository }}."
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Salesforce CLI
+        run: |
+          npm install -g @salesforce/cli
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Create server key
+        env:
+          SERVER_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
+        run: echo "$SERVER_KEY" > server.key
+
+      - name: Authenticate Salesforce Org
+        run: |
+          sf org login jwt \
+            --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58 \
+            --jwt-key-file server.key \
+            --username mohammedasif3825.a9fe638d49ad@agentforce.com \
+            --instance-url http://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com \
+            --alias production
+
+      - name: Debug Test Classes File
+        run: cat test-classes.txt
+
+      - name: Read Test Class Names from File
+        id: read-test-classes
+        run: |
+          TEST_CLASSES=$(cat test-classes.txt | tr '\n' ',' | sed 's/,$//')
+
+          if [ -z "$TEST_CLASSES" ]; then
+            echo "TEST_CLASSES=" >> $GITHUB_ENV
+            echo "RUN_TESTS=false" >> $GITHUB_ENV
+          else
+            echo "TEST_CLASSES=$TEST_CLASSES" >> $GITHUB_ENV
+            echo "RUN_TESTS=true" >> $GITHUB_ENV
+          fi
+
+      - name: Install sfdxGitDelta
+        run: |
+          echo y | sf plugins install sfdx-git-delta
+
+      - name: Generate Delta between main and PR Branch
+        run: |
+          # Generate delta changes between the base branch and PR branch
+          sf sgd source delta \
+            --to "HEAD" \
+            --from "origin/main" \
+            --output "." \
+            --ignore .github/workflows/ignore.txt
+
+      - name: Update API Version in package.xml
+        run: |
+          sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
+          cat package/package.xml
+
+      # Code Analyzer installation
+      - name: Install Salesforce Code Analyzer
+        run: |
+          sf plugins install code-analyzer
+
+      # Read only components listed in package.xml
+      - name: Generate Code Analyzer Targets from package.xml
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = Path("package/package.xml")
+
+          if not manifest.is_file():
+              raise SystemExit("ERROR: package/package.xml not found.")
+
+          root = ET.parse(manifest).getroot()
+
+          # Code Analyzer workspace is force-app.
+          base = Path("force-app/main/default")
+          targets = set()
+
+          metadata_paths = {
+              "ApexClass": ("classes", ".cls"),
+              "ApexTrigger": ("triggers", ".trigger"),
+          }
+
+          for item in root.findall(".//{*}types"):
+              metadata_type = item.findtext("{*}name")
+              members = [
+                  member.text
+                  for member in item.findall("{*}members")
+                  if member.text
+              ]
+
+              # Apex Classes and Apex Triggers
+              if metadata_type in metadata_paths:
+                  folder, extension = metadata_paths[metadata_type]
+                  directory = base / folder
+
+                  for member in members:
+                      if member == "*":
+                          if directory.is_dir():
+                              targets.update(
+                                  str(path)
+                                  for path in directory.glob(f"*{extension}")
+                                  if path.is_file()
+                              )
+                      else:
+                          path = directory / f"{member}{extension}"
+                          if path.is_file():
+                              targets.add(str(path))
+
+              # Lightning Web Components and Aura bundles
+              elif metadata_type in (
+                  "LightningComponentBundle",
+                  "AuraDefinitionBundle"
+              ):
+                  folder = (
+                      "lwc"
+                      if metadata_type == "LightningComponentBundle"
+                      else "aura"
+                  )
+
+                  directory = base / folder
+
+                  for member in members:
+                      if member == "*":
+                          if directory.is_dir():
+                              targets.update(
+                                  str(path)
+                                  for path in directory.iterdir()
+                                  if path.is_dir()
+                              )
+                      else:
+                          path = directory / member
+                          if path.is_dir():
+                              targets.add(str(path))
+
+          targets = sorted(targets)
+
+          output_file = Path("code-analyzer-targets.txt")
+
+          if targets:
+              output_file.write_text("\n".join(targets) + "\n")
+              print("Components selected from package.xml:")
+              for target in targets:
+                  print(f"- {target}")
+          else:
+              output_file.write_text("")
+              print("No supported changed components found in package.xml.")
+
+          PY
+
+      # Scan only manifest-selected components
+      - name: Code Analyzer Quality Gate (package.xml components only)
+        shell: bash
+        run: |
+          mapfile -t TARGETS < code-analyzer-targets.txt
+
+          echo "## Code Analyzer - Manifest Based Scan" >> $GITHUB_STEP_SUMMARY
+
+          if [ ${#TARGETS[@]} -eq 0 ]; then
+            echo "No supported components found in package.xml. Scan skipped." >> $GITHUB_STEP_SUMMARY
+            echo "No supported components to scan."
+            exit 0
+          fi
+
+          echo "Scanning components listed in package.xml:"
+          printf '%s\n' "${TARGETS[@]}"
+
+          echo "### Scanned Components" >> $GITHUB_STEP_SUMMARY
+          printf '%s\n' "${TARGETS[@]}" | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
+
+          ARGS=()
+
+          for target in "${TARGETS[@]}"; do
+            ARGS+=(--target "$target")
+          done
+
+          STATUS=0
+
+          sf code-analyzer run \
+            --workspace force-app \
+            "${ARGS[@]}" \
+            --rule-selector Recommended \
+            --severity-threshold 2 \
+            --output-file code-analyzer-report.csv || STATUS=$?
+
+          if [ "$STATUS" -eq 0 ]; then
+            echo "Result: PASSED" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "Result: FAILED - Issues at or above severity threshold." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          exit $STATUS
+
+      - name: Upload Code Analyzer report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-analyzer-report
+          path: code-analyzer-report.csv
+          if-no-files-found: ignore
+
+      - name: Debug Environment Variables
+        run: |
+          echo "TEST_CLASSES=${{ env.TEST_CLASSES }}"
+          echo "RUN_TESTS=${{ env.RUN_TESTS }}"
+
+      - name: Validate Delta Components with Specified Tests
+        if: ${{ env.RUN_TESTS == 'true' }}
+        run: |
+          if [ -z "${{ env.TEST_CLASSES }}" ]; then
+            echo "No test classes specified. Exiting."
+            exit 1
+          fi
+
+          echo "Running specified tests: ${{ env.TEST_CLASSES }}"
+
+          sf project deploy validate \
+            --manifest package/package.xml \
+            --test-level RunSpecifiedTests \
+            --tests ${{ env.TEST_CLASSES }} \
+            --target-org production \
+            --api-version 66.0

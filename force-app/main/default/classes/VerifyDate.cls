@@ -29,4 +29,4 @@ public class VerifyDate {
     }
  }
  
-//Testing GitHub Actions DevOps Pipeline - code analyzer gate
+//Testing GitHub Actions DevOps Pipeline - code analyzer 
