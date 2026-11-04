@@ -101,7 +101,7 @@ jobs:
           root = ET.parse(manifest).getroot()
 
           # Code Analyzer workspace is force-app.
-          base = Path("main/default")
+          base = Path("force-app/main/default")
           targets = set()
 
           metadata_paths = {
