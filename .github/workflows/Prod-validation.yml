@@ -208,7 +208,7 @@ jobs:
             --workspace force-app \
             "${ARGS[@]}" \
             --rule-selector Recommended \
-            --severity-threshold 3 \
+            --severity-threshold 2 \
             --output-file code-analyzer-report.csv || STATUS=$?
 
           if [ "$STATUS" -eq 0 ]; then
