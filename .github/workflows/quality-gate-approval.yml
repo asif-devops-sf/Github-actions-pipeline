@@ -1,0 +1,50 @@
+
+name: Quality Gate Bypass Approval
+
+on:
+  pull_request_review:
+    types:
+      - submitted
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  verify-bypass-approval:
+    if: >-
+      github.event.review.state == 'approved' &&
+      github.event.review.user.login == vars.QUALITY_GATE_APPROVER &&
+      contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Verify bypass approver
+        env:
+          APPROVER: ${{ github.event.review.user.login }}
+          EXPECTED_APPROVER: ${{ vars.QUALITY_GATE_APPROVER }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEW_COMMIT: ${{ github.event.review.commit_id }}
+          HEAD_COMMIT: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$APPROVER" != "$EXPECTED_APPROVER" ]; then
+            echo "Unauthorized approver."
+            exit 1
+          fi
+
+          if [ "$REVIEW_STATE" != "approved" ]; then
+            echo "Approval is not valid."
+            exit 1
+          fi
+
+          if [ "$REVIEW_COMMIT" != "$HEAD_COMMIT" ]; then
+            echo "Approval is not for the latest PR commit."
+            exit 1
+          fi
+
+          echo "Authorized bypass approval verified."
+          echo "PR: $PR_NUMBER"
+          echo "Approver: $APPROVER"
+          echo "Approved commit: $REVIEW_COMMIT"

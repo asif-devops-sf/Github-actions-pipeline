@@ -5,12 +5,100 @@ on:
   pull_request:
     branches:
       - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+
+  pull_request_review:
+    types:
+      - submitted
+
+permissions:
+  contents: read
+  pull-requests: read
 
 jobs:
   SFDX-CLI-Deploy:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # STEP 1: Check whether an approved quality gate bypass exists
+      - name: Check Quality Gate Bypass Approval
+        id: gate-decision
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPROVER: ${{ vars.QUALITY_GATE_APPROVER }}
+          BYPASS_REQUESTED: ${{ contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested') }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Quality Gate Bypass Decision"
+          echo "PR: $PR_NUMBER"
+          echo "Expected approver: $APPROVER"
+          echo "Latest PR commit: $HEAD_SHA"
+
+          if [ "$BYPASS_REQUESTED" != "true" ]; then
+            echo "No bypass requested. Quality gates will run."
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Bypass requested. Waiting for authorized review."
+
+          TIMEOUT=3600
+          INTERVAL=30
+          ELAPSED=0
+
+          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
+
+            REVIEWS=$(gh api --paginate --slurp \
+              "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews")
+
+            DECISION=$(echo "$REVIEWS" | jq -r \
+              --arg approver "$APPROVER" \
+              --arg sha "$HEAD_SHA" \
+              '[.[][] |
+                select(
+                  .user.login == $approver and
+                  .commit_id == $sha
+                )
+              ] | last // empty | .state // empty')
+
+            if [ "$DECISION" = "APPROVED" ]; then
+              echo "Authorized bypass approval verified."
+              echo "Approver: $APPROVER"
+              echo "Approved commit: $HEAD_SHA"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            if [ "$DECISION" = "CHANGES_REQUESTED" ]; then
+              echo "Bypass rejected by authorized approver."
+              echo "Quality gates will run."
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "Approval pending. Waiting for authorized reviewer..."
+            sleep "$INTERVAL"
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "Approval timeout. Quality gate bypass not authorized."
+          echo "The validation workflow will fail safely."
+          exit 1
+
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -18,10 +106,6 @@ jobs:
       - run: echo "GitHub Action running on ${{ runner.os }}"
 
       - run: echo "Retrieving main Branch from ${{ github.repository }}."
-
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Salesforce CLI
         run: |
@@ -68,7 +152,6 @@ jobs:
 
       - name: Generate Delta between main and PR Branch
         run: |
-          # Generate delta changes between the base branch and PR branch
           sf sgd source delta \
             --to "HEAD" \
             --from "origin/main" \
@@ -80,13 +163,15 @@ jobs:
           sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
           cat package/package.xml
 
-      # Code Analyzer installation
+      # STEP 2: Install Code Analyzer only when bypass is not approved
       - name: Install Salesforce Code Analyzer
+        if: steps.gate-decision.outputs.skip != 'true'
         run: |
           sf plugins install code-analyzer
 
-      # Read only components listed in package.xml
+      # STEP 3: Generate Analyzer targets only when required
       - name: Generate Code Analyzer Targets from package.xml
+        if: steps.gate-decision.outputs.skip != 'true'
         shell: bash
         run: |
           python3 - <<'PY'
@@ -100,7 +185,6 @@ jobs:
 
           root = ET.parse(manifest).getroot()
 
-          # Code Analyzer workspace is force-app.
           base = Path("force-app/main/default")
           targets = set()
 
@@ -117,7 +201,6 @@ jobs:
                   if member.text
               ]
 
-              # Apex Classes and Apex Triggers
               if metadata_type in metadata_paths:
                   folder, extension = metadata_paths[metadata_type]
                   directory = base / folder
@@ -135,7 +218,6 @@ jobs:
                           if path.is_file():
                               targets.add(str(path))
 
-              # Lightning Web Components and Aura bundles
               elif metadata_type in (
                   "LightningComponentBundle",
                   "AuraDefinitionBundle"
@@ -176,8 +258,9 @@ jobs:
 
           PY
 
-      # Scan only manifest-selected components
+      # STEP 4: Run Analyzer only when bypass is not approved
       - name: Code Analyzer Quality Gate (package.xml components only)
+        if: steps.gate-decision.outputs.skip != 'true'
         shell: bash
         run: |
           mapfile -t TARGETS < code-analyzer-targets.txt
@@ -219,8 +302,17 @@ jobs:
 
           exit $STATUS
 
+      - name: Record Quality Gate Bypass
+        if: steps.gate-decision.outputs.skip == 'true'
+        run: |
+          echo "## Quality Gate Bypass" >> $GITHUB_STEP_SUMMARY
+          echo "Salesforce Code Analyzer was skipped." >> $GITHUB_STEP_SUMMARY
+          echo "Authorized approver: ${{ vars.QUALITY_GATE_APPROVER }}" >> $GITHUB_STEP_SUMMARY
+          echo "PR: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: ${{ github.event.pull_request.head.sha }}" >> $GITHUB_STEP_SUMMARY
+
       - name: Upload Code Analyzer report
-        if: always()
+        if: always() && steps.gate-decision.outputs.skip != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: code-analyzer-report
