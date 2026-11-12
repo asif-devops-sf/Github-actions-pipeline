@@ -12,22 +12,43 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write   # needed to remove the bypass label when new commits are pushed
+  pull-requests: read
 
-# One run per PR: a new run cancels the one already in progress
+# One run per PR: a new run cancels the one already in progress.
+# Unrelated labels (not the bypass label) get their own unique group, so they
+# can never cancel a real validation run.
 concurrency:
-  group: validate-pr-${{ github.event.pull_request.number }}
+  group: validate-pr-${{ github.event.pull_request.number }}-${{ (github.event.action == 'labeled' && github.event.label.name != 'quality-gate-bypass-requested') && github.run_id || 'main' }}
   cancel-in-progress: true
 
 jobs:
-  SFDX-CLI-Deploy:
-    # On the labeled event, run only for the bypass label (other labels are ignored)
-    # On opened, skip if the bypass label is already present (the labeled event that follows handles it)
+  # Pauses until a reviewer configured on the "quality-gate-bypass" environment
+  # (Settings > Environments) approves. Runs only when the bypass label is present.
+  # No runner time is used while the run is waiting for approval.
+  bypass-approval:
     if: >-
-      github.event.action == 'synchronize' ||
-      github.event.action == 'reopened' ||
-      (github.event.action == 'opened' && !contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested')) ||
-      (github.event.action == 'labeled' && github.event.label.name == 'quality-gate-bypass-requested')
+      contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested') &&
+      (
+        github.event.action == 'synchronize' ||
+        github.event.action == 'reopened' ||
+        (github.event.action == 'labeled' && github.event.label.name == 'quality-gate-bypass-requested')
+      )
+    runs-on: ubuntu-latest
+    environment: quality-gate-bypass
+    steps:
+      - name: Bypass approved
+        run: echo "Quality gate bypass approved for PR #${{ github.event.pull_request.number }}"
+
+  SFDX-CLI-Deploy:
+    # Waits for bypass-approval (if it was triggered) before doing anything
+    needs: bypass-approval
+    if: >-
+      !cancelled() && (
+        github.event.action == 'synchronize' ||
+        github.event.action == 'reopened' ||
+        (github.event.action == 'opened' && !contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested')) ||
+        (github.event.action == 'labeled' && github.event.label.name == 'quality-gate-bypass-requested')
+      )
     runs-on: ubuntu-latest
 
     steps:
@@ -35,67 +56,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      # STEP 1: Bypass decision (single action: the label must be added by the authorized approver)
-      - name: Check Quality Gate Bypass
+      # STEP 1: Bypass decision (approved only if the environment reviewer approved)
+      - name: Quality Gate Bypass Decision
         id: gate-decision
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPROVER: ${{ vars.QUALITY_GATE_APPROVER }}
-          LABEL: quality-gate-bypass-requested
-          BYPASS_REQUESTED: ${{ contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested') }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-          EVENT_ACTION: ${{ github.event.action }}
+          BYPASS_RESULT: ${{ needs.bypass-approval.result }}
         shell: bash
         run: |
-          set -euo pipefail
+          echo "Bypass approval result: $BYPASS_RESULT"
 
-          echo "Quality Gate Bypass Decision"
-          echo "PR: $PR_NUMBER"
-          echo "Event: $EVENT_ACTION"
-          echo "Authorized approver: ${APPROVER:-<not configured>}"
-
-          SKIP=false
-          LABELED_BY=""
-
-          if [ "$BYPASS_REQUESTED" != "true" ]; then
-            echo "No bypass label. Quality gates will run."
-
-          elif [ "$EVENT_ACTION" = "synchronize" ] || [ "$EVENT_ACTION" = "reopened" ]; then
-            echo "PR changed after bypass was granted. Removing bypass label; re-approval needed."
-            gh api -X DELETE "repos/$REPOSITORY/issues/$PR_NUMBER/labels/$LABEL" > /dev/null || true
-            echo "Quality gates will run."
-
-          elif [ -z "$APPROVER" ]; then
-            echo "QUALITY_GATE_APPROVER variable is not configured. Quality gates will run."
-
+          if [ "$BYPASS_RESULT" = "success" ]; then
+            echo "Bypass approved by environment reviewer. Quality gates will be skipped."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
           else
-            # Who added the label? (the events API can lag slightly, so retry a few times)
-            for attempt in 1 2 3; do
-              LABELED_BY=$(gh api --paginate --slurp \
-                "repos/$REPOSITORY/issues/$PR_NUMBER/events" \
-                | jq -r --arg label "$LABEL" \
-                  '[.[][] | select(.event == "labeled" and .label.name == $label)]
-                   | last | .actor.login // empty')
-
-              if [ -n "$LABELED_BY" ]; then
-                break
-              fi
-              sleep 3
-            done
-
-            echo "Bypass label added by: ${LABELED_BY:-<unknown>}"
-
-            if [ -n "$LABELED_BY" ] && [ "${LABELED_BY,,}" = "${APPROVER,,}" ]; then
-              echo "Authorized bypass verified. Quality gates will be skipped."
-              SKIP=true
+            if [ "$BYPASS_RESULT" = "failure" ]; then
+              echo "Bypass was rejected. Quality gates will run."
             else
-              echo "Bypass label was NOT added by the authorized approver. Quality gates will run."
+              echo "No bypass requested. Quality gates will run."
             fi
+            echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
-
-          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
-          echo "labeled_by=$LABELED_BY" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -333,13 +313,12 @@ jobs:
       - name: Record Quality Gate Bypass
         if: steps.gate-decision.outputs.skip == 'true'
         env:
-          LABELED_BY: ${{ steps.gate-decision.outputs.labeled_by }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "## Quality Gate Bypass" >> $GITHUB_STEP_SUMMARY
           echo "Salesforce Code Analyzer was skipped." >> $GITHUB_STEP_SUMMARY
-          echo "Bypass label added by authorized approver: $LABELED_BY" >> $GITHUB_STEP_SUMMARY
+          echo "Approved via the quality-gate-bypass environment reviewers." >> $GITHUB_STEP_SUMMARY
           echo "PR: #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
           echo "Commit: $HEAD_SHA" >> $GITHUB_STEP_SUMMARY
 
