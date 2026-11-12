@@ -37,7 +37,10 @@ jobs:
     environment: quality-gate-bypass
     steps:
       - name: Bypass approved
-        run: echo "Quality gate bypass approved for PR #${{ github.event.pull_request.number }}"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          echo "Quality gate bypass approved for PR #$PR_NUMBER"
 
   SFDX-CLI-Deploy:
     # Waits for bypass-approval (if it was triggered) before doing anything
