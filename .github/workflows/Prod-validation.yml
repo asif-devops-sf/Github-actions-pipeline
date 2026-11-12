@@ -11,11 +11,7 @@ on:
       - reopened
       - labeled
       - unlabeled
-
-  pull_request_review:
-    types:
-      - submitted
-
+      
 permissions:
   contents: read
   pull-requests: read
