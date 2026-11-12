@@ -1,68 +1,140 @@
+
 name: main Branch to Production
-on: 
+
+on:
   push:
-    branches: 
+    branches:
       - main
-      - dev
- 
+
 jobs:
   SFDX-CLI-Deploy:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+
       - run: echo "GitHub Action running on ${{ runner.os }}"
+
       - run: echo "Retrieving main Branch from ${{ github.repository }}."
-      - name: 'Read PR Body and Format Tests'
-        env:
-           PR_BODY: ${{ github.event.head_commit.message }}
-        run: |
-             echo "Original Merge Commit Message: $PR_BODY"
-      
-             # Extract test classes using regex (Modify based on your commit message pattern)
-             TESTS=$(echo "$PR_BODY" | grep -oP '(?<=TESTS: )[^]]*' || echo "all")
-      
-             # Save extracted test classes
-             echo "Extracted Tests: $TESTS"
-             echo "APEX_TESTS=$TESTS" >> $GITHUB_ENV
-  
-             # Ensure the merge comment appears in a structured format
-             echo "Formatted Commit Message:"
-             echo "Merge Commit: $(echo "$PR_BODY" | tr '\n' ' ')"
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Read PR Body and Format Tests
+        env:
+          PR_BODY: ${{ github.event.head_commit.message }}
+        run: |
+          echo "Original Merge Commit Message: $PR_BODY"
+
+          TESTS=$(echo "$PR_BODY" | grep -oP '(?<=TESTS: )[^]]*' || echo "all")
+
+          echo "Extracted Tests: $TESTS"
+          echo "APEX_TESTS=$TESTS" >> "$GITHUB_ENV"
+
+          echo "Formatted Commit Message:"
+          echo "Merge Commit: $(echo "$PR_BODY" | tr '\n' ' ')"
+
       - name: Install Salesforce CLI
         run: |
           npm install @salesforce/cli --global
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      
-      - name: Install sfdxGit delta
+
+      - name: Install sfdxGitDelta and Generate Delta
         run: |
           echo y | sf plugins install sfdx-git-delta
-          sf sgd:source:delta --to "HEAD" --from "HEAD~1"  --output "." --ignore .github/workflows/ignore.txt
+
+          sf sgd source delta \
+            --to "HEAD" \
+            --from "HEAD~1" \
+            --output "." \
+            --ignore .github/workflows/ignore.txt
 
       - name: Update API Version in package.xml
         run: |
           sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
           cat package/package.xml
-          
+
+      # Check whether the delta contains deployable Salesforce metadata
+      - name: Check Salesforce Delta
+        id: delta-check
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = Path("package/package.xml")
+
+          if not manifest.is_file():
+              raise SystemExit("ERROR: package/package.xml not found.")
+
+          root = ET.parse(manifest).getroot()
+
+          has_delta = any(
+              member.text and member.text.strip()
+              for member in root.findall(".//{*}members")
+          )
+
+          with open("delta-status.txt", "w") as f:
+              f.write(f"HAS_DELTA={'true' if has_delta else 'false'}\n")
+
+          print(f"Salesforce metadata available: {has_delta}")
+          PY
+
+          cat delta-status.txt >> "$GITHUB_ENV"
+
+      # Authenticate only when Salesforce metadata is available
       - name: Create server key
+        if: env.HAS_DELTA == 'true'
         env:
           SERVER_KEY: ${{ secrets.SALESFORCE_JWT_SECRET_KEY }}
-        run: echo "$SERVER_KEY" > server.key
-      - run: sf org login jwt --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58
-         --jwt-key-file server.key --username mohammedasif3825.a9fe638d49ad@agentforce.com --instance-url http://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com --alias production
+        run: |
+          echo "$SERVER_KEY" > server.key
+
+      - name: Authenticate Salesforce Org
+        if: env.HAS_DELTA == 'true'
+        run: |
+          sf org login jwt \
+            --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58 \
+            --jwt-key-file server.key \
+            --username mohammedasif3825.a9fe638d49ad@agentforce.com \
+            --instance-url https://login.salesforce.com \
+            --alias production
+
+      # Deploy selected Apex tests
       - name: Deploy Delta components to Salesforce RunSpecifiedTests
-        if: ${{ env.APEX_TESTS != 'all' }}
+        if: ${{ env.HAS_DELTA == 'true' && env.APEX_TESTS != 'all' }}
         run: |
-          sf project deploy start --manifest package/package.xml --test-level RunSpecifiedTests --tests ${{ env.APEX_TESTS }} --target-org production --ignore-conflicts --api-version 66.0
- 
+          sf project deploy start \
+            --manifest package/package.xml \
+            --test-level RunSpecifiedTests \
+            --tests "${{ env.APEX_TESTS }}" \
+            --target-org production \
+            --ignore-conflicts \
+            --api-version 66.0
+
+      # Deploy with local tests
       - name: Deploy Delta components to Salesforce RunLocalTests
-        if: ${{ env.APEX_TESTS == 'all' }}
+        if: ${{ env.HAS_DELTA == 'true' && env.APEX_TESTS == 'all' }}
         run: |
-            sf project deploy start --manifest package/package.xml --test-level RunLocalTests --target-org production --ignore-conflicts --api-version 66.0
+          sf project deploy start \
+            --manifest package/package.xml \
+            --test-level RunLocalTests \
+            --target-org production \
+            --ignore-conflicts \
+            --api-version 66.0
+
+      # Report when there is nothing to deploy
+      - name: Skip Deployment - No Salesforce Metadata Changes
+        if: env.HAS_DELTA == 'false'
+        run: |
+          echo "No Salesforce metadata changes detected."
+          echo "Production deployment skipped."
+          echo "This commit contains no deployable Salesforce delta."
