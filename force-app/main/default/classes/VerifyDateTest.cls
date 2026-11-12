@@ -30,4 +30,4 @@ private class VerifyDateTest {
     }  
 }
 
-  //Testing GitHub Actions DevOps Pipeline
+  // Normal Quality Gate Test
