@@ -325,7 +325,7 @@ jobs:
           echo "RUN_TESTS=${{ env.RUN_TESTS }}"
 
       - name: Validate Delta Components with Specified Tests
-        if: ${{ env.RUN_TESTS == 'true' }}
+        if: ${{ env.RUN_TESTS == 'true' && env.HAS_DELTA == 'true' }}
         run: |
           if [ -z "${{ env.TEST_CLASSES }}" ]; then
             echo "No test classes specified. Exiting."
