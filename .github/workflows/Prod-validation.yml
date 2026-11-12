@@ -1,4 +1,3 @@
-
 name: validate delta changes in Production
 
 on:
@@ -10,14 +9,25 @@ on:
       - synchronize
       - reopened
       - labeled
-      - unlabeled
-      
+
 permissions:
   contents: read
-  pull-requests: read
+  pull-requests: write   # needed to remove the bypass label when new commits are pushed
+
+# One run per PR: a new run cancels the one already in progress
+concurrency:
+  group: validate-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   SFDX-CLI-Deploy:
+    # On the labeled event, run only for the bypass label (other labels are ignored)
+    # On opened, skip if the bypass label is already present (the labeled event that follows handles it)
+    if: >-
+      github.event.action == 'synchronize' ||
+      github.event.action == 'reopened' ||
+      (github.event.action == 'opened' && !contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested')) ||
+      (github.event.action == 'labeled' && github.event.label.name == 'quality-gate-bypass-requested')
     runs-on: ubuntu-latest
 
     steps:
@@ -25,75 +35,67 @@ jobs:
         with:
           fetch-depth: 0
 
-      # STEP 1: Check whether an approved quality gate bypass exists
-      - name: Check Quality Gate Bypass Approval
+      # STEP 1: Bypass decision (single action: the label must be added by the authorized approver)
+      - name: Check Quality Gate Bypass
         id: gate-decision
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPROVER: ${{ vars.QUALITY_GATE_APPROVER }}
+          LABEL: quality-gate-bypass-requested
           BYPASS_REQUESTED: ${{ contains(github.event.pull_request.labels.*.name, 'quality-gate-bypass-requested') }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           REPOSITORY: ${{ github.repository }}
+          EVENT_ACTION: ${{ github.event.action }}
         shell: bash
         run: |
           set -euo pipefail
 
           echo "Quality Gate Bypass Decision"
           echo "PR: $PR_NUMBER"
-          echo "Expected approver: $APPROVER"
-          echo "Latest PR commit: $HEAD_SHA"
+          echo "Event: $EVENT_ACTION"
+          echo "Authorized approver: ${APPROVER:-<not configured>}"
+
+          SKIP=false
+          LABELED_BY=""
 
           if [ "$BYPASS_REQUESTED" != "true" ]; then
-            echo "No bypass requested. Quality gates will run."
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            echo "No bypass label. Quality gates will run."
+
+          elif [ "$EVENT_ACTION" = "synchronize" ] || [ "$EVENT_ACTION" = "reopened" ]; then
+            echo "PR changed after bypass was granted. Removing bypass label; re-approval needed."
+            gh api -X DELETE "repos/$REPOSITORY/issues/$PR_NUMBER/labels/$LABEL" > /dev/null || true
+            echo "Quality gates will run."
+
+          elif [ -z "$APPROVER" ]; then
+            echo "QUALITY_GATE_APPROVER variable is not configured. Quality gates will run."
+
+          else
+            # Who added the label? (the events API can lag slightly, so retry a few times)
+            for attempt in 1 2 3; do
+              LABELED_BY=$(gh api --paginate --slurp \
+                "repos/$REPOSITORY/issues/$PR_NUMBER/events" \
+                | jq -r --arg label "$LABEL" \
+                  '[.[][] | select(.event == "labeled" and .label.name == $label)]
+                   | last | .actor.login // empty')
+
+              if [ -n "$LABELED_BY" ]; then
+                break
+              fi
+              sleep 3
+            done
+
+            echo "Bypass label added by: ${LABELED_BY:-<unknown>}"
+
+            if [ -n "$LABELED_BY" ] && [ "${LABELED_BY,,}" = "${APPROVER,,}" ]; then
+              echo "Authorized bypass verified. Quality gates will be skipped."
+              SKIP=true
+            else
+              echo "Bypass label was NOT added by the authorized approver. Quality gates will run."
+            fi
           fi
 
-          echo "Bypass requested. Waiting for authorized review."
-
-          TIMEOUT=3600
-          INTERVAL=30
-          ELAPSED=0
-
-          while [ "$ELAPSED" -lt "$TIMEOUT" ]; do
-
-            REVIEWS=$(gh api --paginate --slurp \
-              "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews")
-
-            DECISION=$(echo "$REVIEWS" | jq -r \
-              --arg approver "$APPROVER" \
-              --arg sha "$HEAD_SHA" \
-              '[.[][] |
-                select(
-                  .user.login == $approver and
-                  .commit_id == $sha
-                )
-              ] | last // empty | .state // empty')
-
-            if [ "$DECISION" = "APPROVED" ]; then
-              echo "Authorized bypass approval verified."
-              echo "Approver: $APPROVER"
-              echo "Approved commit: $HEAD_SHA"
-              echo "skip=true" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-
-            if [ "$DECISION" = "CHANGES_REQUESTED" ]; then
-              echo "Bypass rejected by authorized approver."
-              echo "Quality gates will run."
-              echo "skip=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-
-            echo "Approval pending. Waiting for authorized reviewer..."
-            sleep "$INTERVAL"
-            ELAPSED=$((ELAPSED + INTERVAL))
-          done
-
-          echo "Approval timeout. Quality gate bypass not authorized."
-          echo "The validation workflow will fail safely."
-          exit 1
+          echo "skip=$SKIP" >> "$GITHUB_OUTPUT"
+          echo "labeled_by=$LABELED_BY" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-node@v4
         with:
@@ -123,7 +125,7 @@ jobs:
             --client-id 3MVG9XgkMlifdwVARKX9mYeDMGUNFWpTzdqjm3Wt1GC4nAcnwzd45CE4lCVFLZ8UVvQYHti..F6EuVnH0Tr58 \
             --jwt-key-file server.key \
             --username mohammedasif3825.a9fe638d49ad@agentforce.com \
-            --instance-url http://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com \
+            --instance-url https://orgfarm-18d64b3d75-dev-ed.develop.my.salesforce.com \
             --alias production
 
       - name: Debug Test Classes File
@@ -158,6 +160,36 @@ jobs:
         run: |
           sed -i 's|<version>55.0</version>|<version>66.0</version>|g' package/package.xml
           cat package/package.xml
+
+      # Check whether the delta contains deployable Salesforce metadata
+      # (HAS_DELTA was previously never set in the validation workflow)
+      - name: Check Salesforce Delta
+        id: delta-check
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          manifest = Path("package/package.xml")
+
+          if not manifest.is_file():
+              raise SystemExit("ERROR: package/package.xml not found.")
+
+          root = ET.parse(manifest).getroot()
+
+          has_delta = any(
+              member.text and member.text.strip()
+              for member in root.findall(".//{*}members")
+          )
+
+          with open("delta-status.txt", "w") as f:
+              f.write(f"HAS_DELTA={'true' if has_delta else 'false'}\n")
+
+          print(f"Salesforce metadata available: {has_delta}")
+          PY
+
+          cat delta-status.txt >> "$GITHUB_ENV"
 
       # STEP 2: Install Code Analyzer only when bypass is not approved
       - name: Install Salesforce Code Analyzer
@@ -300,12 +332,16 @@ jobs:
 
       - name: Record Quality Gate Bypass
         if: steps.gate-decision.outputs.skip == 'true'
+        env:
+          LABELED_BY: ${{ steps.gate-decision.outputs.labeled_by }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo "## Quality Gate Bypass" >> $GITHUB_STEP_SUMMARY
           echo "Salesforce Code Analyzer was skipped." >> $GITHUB_STEP_SUMMARY
-          echo "Authorized approver: ${{ vars.QUALITY_GATE_APPROVER }}" >> $GITHUB_STEP_SUMMARY
-          echo "PR: #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
-          echo "Commit: ${{ github.event.pull_request.head.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "Bypass label added by authorized approver: $LABELED_BY" >> $GITHUB_STEP_SUMMARY
+          echo "PR: #$PR_NUMBER" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: $HEAD_SHA" >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Code Analyzer report
         if: always() && steps.gate-decision.outputs.skip != 'true'
